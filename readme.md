@@ -6,13 +6,13 @@ behind a binary is to distribute one executable that can automatically extract
 required files.
 
 ```
-go get -v -u github.com/sanderhahn/gozip/cmd/gozip
+go get -v -u github.com/klustic/gozip/cmd/gozip
 ```
 
 The api consist of the `Zip`, `UnzipList` and `Unzip` functions:
 
 ```go
-import "github.com/sanderhahn/gozip"
+import "github.com/klustic/gozip"
 
 // zip files/directories into file.zip (file.zip can also be an executable)
 err := gozip.Zip("file.zip", []string{"content.txt", ...})
