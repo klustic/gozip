@@ -3,11 +3,9 @@ package gozip
 import (
 	"archive/zip"
 	"bytes"
-	"compress/flate"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"io/ioutil"
 	"os"
@@ -29,7 +27,6 @@ func IsZip(path string) bool {
 // Zip takes all the files (dirs) and zips them into path
 func Zip(path string, dirs []string) (err error) {
 	if IsZip(path) {
-		// return errors.New(path + " is already a zip file")
 		return AppendZip(path, dirs)
 	}
 
@@ -80,24 +77,25 @@ func Zip(path string, dirs []string) (err error) {
 	return
 }
 
-func generateChunk(name string, data []byte) (chunk []byte, err error) {
+func generateChunk(f *os.File) (chunk []byte, err error) {
 	chunk = make([]byte, 0, 0)
 
-	// Calculate CRC32 of uncompressed data
-	crc := make([]byte, 4, 4)
-	binary.LittleEndian.PutUint32(crc, crc32.ChecksumIEEE(data))
-
 	// Compress data (DEFLATE)
-	var temp bytes.Buffer
-	flateWriter, err := flate.NewWriter(&temp, flate.DefaultCompression)
-	defer flateWriter.Close()
-	flateWriter.Write(data)
-	flateWriter.Flush()
-	compressedData := temp.Bytes()
+	compressor, err := NewCRCCompressor()
+	if err != nil {
+		return nil, err
+	}
+	io.Copy(compressor, f)
+	compressedData, crc := compressor.Finish()
+
+	// Convert crc to byte slice
+	crcBytes := make([]byte, 4, 4)
+	binary.LittleEndian.PutUint32(crcBytes, crc)
 
 	// Calculate size of uncompressed data
+	stats, _ := f.Stat()
 	sizeU := make([]byte, 4, 4)
-	binary.LittleEndian.PutUint32(sizeU, uint32(len(data)))
+	binary.LittleEndian.PutUint32(sizeU, uint32(stats.Size()))
 
 	// Calculate size of compressed data
 	sizeC := make([]byte, 4, 4)
@@ -105,7 +103,7 @@ func generateChunk(name string, data []byte) (chunk []byte, err error) {
 
 	// Calculate name length
 	sizeN := make([]byte, 2, 2)
-	binary.LittleEndian.PutUint16(sizeN, uint16(len(name)))
+	binary.LittleEndian.PutUint16(sizeN, uint16(len(f.Name())))
 
 	// Calculate modified timestamp in epoch time -- TODO : use actual modified time?
 	now := time.Now()
@@ -120,12 +118,12 @@ func generateChunk(name string, data []byte) (chunk []byte, err error) {
 	chunk = append(chunk, []byte{8, 0}...)                          // compression method (DEFLATE)
 	chunk = append(chunk, []byte{0, 0}...)                          // TODO : last modification time
 	chunk = append(chunk, []byte{0, 0}...)                          // TODO : last modification date
-	chunk = append(chunk, crc...)                                   // CRC32 of uncompressed data
+	chunk = append(chunk, crcBytes...)                              // CRC32 of uncompressed data
 	chunk = append(chunk, sizeC...)                                 // size of compressed data
 	chunk = append(chunk, sizeU...)                                 // size of uncompressed data
 	chunk = append(chunk, sizeN...)                                 // size of filename
 	chunk = append(chunk, []byte{uint8(len(extraTimestamp)), 0}...) // size of extra field
-	chunk = append(chunk, []byte(name)...)                          // filename
+	chunk = append(chunk, []byte(f.Name())...)                      // filename
 	chunk = append(chunk, extraTimestamp...)                        // extra data (timestamp)
 	chunk = append(chunk, compressedData...)
 
@@ -134,6 +132,8 @@ func generateChunk(name string, data []byte) (chunk []byte, err error) {
 
 // Add hidden file(s) to ZIP
 func AppendZip(path string, dirs []string) (err error) {
+	allData := make([]byte, 0, 0)
+
 	// Open the ZIP file
 	zipFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
@@ -146,7 +146,16 @@ func AppendZip(path string, dirs []string) (err error) {
 	_, err = zipFile.Read(zipData)
 
 	// TODO : create byte slice of all files, serialized as ZIP files
-	allData, _ := generateChunk("Hidden.xlsx", []byte("Kevin Was Here"))
+	for _, fname := range dirs {
+		f, err := os.Open(fname)
+		if err != nil {
+			fmt.Printf("Unable to open file '%s' (%s), skipping\n", fname, err.Error())
+			continue
+		}
+		defer f.Close()
+		temp, _ := generateChunk(f)
+		allData = append(allData, temp...)
+	}
 
 	// Find end of central directory record, and offset to start of central directory
 	var endOfCentralDirectoryPtr = -1
@@ -154,7 +163,7 @@ func AppendZip(path string, dirs []string) (err error) {
 	for {
 		if bytes.Compare(zipData[ptr:ptr+4], []byte{'P', 'K', 5, 6}) == 0 {
 			endOfCentralDirectoryPtr = ptr
-			fmt.Printf("[+] Found EOCD Record: 0x%x\n", ptr)
+			// fmt.Printf("[+] Found EOCD Record: 0x%x\n", ptr)
 			break
 		}
 		ptr -= 1
@@ -176,7 +185,7 @@ func AppendZip(path string, dirs []string) (err error) {
 	newZipData = append(newZipData, zipData[:startOfCentralDirectory]...)
 	newZipData = append(newZipData, allData...)
 	newZipData = append(newZipData, zipData[startOfCentralDirectory:]...)
-	fmt.Println("[+] Injected data above the central directory!")
+	// fmt.Println("[+] Injected data above the central directory!")
 
 	// Write file back out
 	err = zipFile.Truncate(int64(len(newZipData)))
